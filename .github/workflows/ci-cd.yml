@@ -1,0 +1,60 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  build:
+    name: Build de l'image Docker
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Construire l'image
+        run: docker build -t taskflow-api:${{ github.sha }} .
+
+  deploy:
+    name: Déploiement sur le VPS
+    needs: build
+    # On ne déploie que les push sur main (pas les PR, pas develop)
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configurer la connexion SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Récupérer le code depuis GitHub et relancer l'application
+        env:
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "$SSH_USER@$SSH_HOST" '
+            set -e
+            cd ~/taskflow-api
+            git fetch origin main
+            git reset --hard origin/main
+            docker compose up -d --build --wait
+            docker image prune -f
+          '
